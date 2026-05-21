@@ -1,0 +1,11 @@
+# Core
+streamlit==1.40.2
+pandas==2.2.3
+python-dotenv==1.0.1
+
+# Integrations
+plaid-python==27.0.0
+anthropic==0.40.0
+
+# Charts (streamlit has builtin charts, altair ships with it)
+altair==5.5.0
