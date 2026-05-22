@@ -24,12 +24,22 @@ class SyncResult:
     message: str = ""
 
 
-def _retag_and_detect() -> int:
-    """Recompute subscriptions from everything currently in the DB."""
+def recompute_subscriptions() -> int:
+    """Detect subscriptions from the DB, apply manual overrides, and store them.
+
+    Called after every sync and whenever the user edits manual subscriptions, so
+    manual adds/exclusions always survive re-detection.
+    """
     rows = [dict(r) for r in db.get_transactions()]
+    overrides = [dict(o) for o in db.get_subscription_overrides()]
     subs = subscriptions.detect(rows)
+    subs = subscriptions.apply_overrides(subs, rows, overrides)
     db.replace_subscriptions(subs)
     return len(subs)
+
+
+# Backwards-compatible alias.
+_retag_and_detect = recompute_subscriptions
 
 
 def sync_mock() -> SyncResult:

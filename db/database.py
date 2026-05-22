@@ -283,6 +283,62 @@ def replace_subscriptions(subs: Iterable[dict[str, Any]]) -> None:
             conn.executemany(sql, rows)
 
 
+def add_subscription_override(
+    merchant: str,
+    action: str,
+    *,
+    avg_amount: float | None = None,
+    cadence_days: int | None = None,
+    category: str | None = None,
+) -> None:
+    """Record a manual subscription change (action='add' or 'exclude')."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscription_overrides
+                (merchant, action, avg_amount, cadence_days, category, created_at)
+            VALUES (:merchant, :action, :avg_amount, :cadence_days, :category, :created)
+            ON CONFLICT(merchant) DO UPDATE SET
+                action=excluded.action,
+                avg_amount=excluded.avg_amount,
+                cadence_days=excluded.cadence_days,
+                category=excluded.category
+            """,
+            {
+                "merchant": merchant.strip(),
+                "action": action,
+                "avg_amount": avg_amount,
+                "cadence_days": cadence_days,
+                "category": category,
+                "created": _now_iso(),
+            },
+        )
+
+
+def remove_subscription_override(merchant: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM subscription_overrides WHERE lower(merchant) = lower(:m)",
+            {"m": merchant.strip()},
+        )
+
+
+def get_subscription_overrides() -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM subscription_overrides ORDER BY action, merchant"
+        ).fetchall()
+
+
+def distinct_merchants() -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT merchant FROM transactions "
+            "WHERE merchant IS NOT NULL AND merchant != '' ORDER BY merchant"
+        ).fetchall()
+        return [r["merchant"] for r in rows]
+
+
 def get_subscriptions(status: str | None = None) -> list[sqlite3.Row]:
     sql = "SELECT * FROM subscriptions"
     params: dict[str, Any] = {}

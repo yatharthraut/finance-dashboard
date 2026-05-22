@@ -12,7 +12,7 @@ import streamlit as st
 
 from db import database as db
 from ingest import sync
-from ui import accounts, breakdown, cards, chat_sidebar, link, loan, overview
+from ui import account_detail, accounts, breakdown, cards, chat_sidebar, link, loan, overview
 from ui import subscriptions as subs_view
 from utils.config import settings
 
@@ -57,21 +57,24 @@ def main() -> None:
     _sidebar_controls()
 
     tabs = st.tabs(
-        ["Overview", "Breakdown", "Accounts", "Subscriptions", "Cards", "Loan", "Link"]
+        ["Overview", "Breakdown", "All Transactions", "Accounts",
+         "Subscriptions", "Cards", "Loan", "Link"]
     )
     with tabs[0]:
         overview.render()
     with tabs[1]:
         breakdown.render()
     with tabs[2]:
-        accounts.render()
+        accounts.render()          # All Transactions (filterable, all sources)
     with tabs[3]:
-        subs_view.render()
+        account_detail.render()    # Accounts (per-source, open statement)
     with tabs[4]:
-        cards.render()
+        subs_view.render()
     with tabs[5]:
-        loan.render()
+        cards.render()
     with tabs[6]:
+        loan.render()
+    with tabs[7]:
         link.render()
 
     # Claude chat lives in the sidebar, per the plan.

@@ -133,6 +133,77 @@ def detect(transactions: list[dict], *, today: date | None = None) -> list[dict]
     return subs
 
 
+def _manual_sub(override: dict, txns: list[dict], today: date) -> dict:
+    """Build a subscription row for a manually-added merchant.
+
+    Stats are computed from the merchant's actual transactions when available
+    (works for recurring transfers, which auto-detection skips), falling back to
+    the values supplied in the override.
+    """
+    amounts = [abs(t["amount"]) for t in txns if t.get("amount") is not None]
+    dates = sorted(_parse(t["date"]) for t in txns if t.get("date"))
+    cadence = override.get("cadence_days") or MONTHLY_DAYS
+
+    avg = override.get("avg_amount")
+    if not avg:
+        avg = round(statistics.median(amounts), 2) if amounts else 0.0
+
+    if dates:
+        first, last = dates[0].isoformat(), dates[-1].isoformat()
+        days_since = (today - dates[-1]).days
+        status = "likely_canceled" if days_since > cadence + CANCEL_GRACE_DAYS else "active"
+    else:
+        first = last = today.isoformat()
+        status = "active"
+
+    return {
+        "merchant": override["merchant"],
+        "avg_amount": round(avg, 2),
+        "cadence_days": cadence,
+        "charge_count": len(txns),
+        "first_charge": first,
+        "last_charge": last,
+        "status": status,
+        "category": override.get("category") or "Subscriptions",
+    }
+
+
+def apply_overrides(
+    subs: list[dict],
+    transactions: list[dict],
+    overrides: list[dict],
+    *,
+    today: date | None = None,
+) -> list[dict]:
+    """Layer manual changes over auto-detected subscriptions.
+
+    'exclude' overrides drop a merchant; 'add' overrides force one in (with stats
+    derived from its transactions). Merchant matching is case-insensitive.
+    """
+    today = today or date.today()
+    excluded = {o["merchant"].strip().lower() for o in overrides if o["action"] == "exclude"}
+    adds = [o for o in overrides if o["action"] == "add"]
+
+    result = [s for s in subs if s["merchant"].strip().lower() not in excluded]
+    present = {s["merchant"].strip().lower() for s in result}
+
+    by_merchant: dict[str, list[dict]] = defaultdict(list)
+    for t in transactions:
+        m = (t.get("merchant") or "").strip().lower()
+        if m:
+            by_merchant[m].append(t)
+
+    for o in adds:
+        key = o["merchant"].strip().lower()
+        if key in present:  # already detected — don't duplicate
+            continue
+        result.append(_manual_sub(o, by_merchant.get(key, []), today))
+        present.add(key)
+
+    result.sort(key=lambda s: s["avg_amount"], reverse=True)
+    return result
+
+
 def monthly_total(subs: list[dict]) -> float:
     """Sum of active subscription costs normalized to a monthly (30-day) figure."""
     total = 0.0

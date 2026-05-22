@@ -68,6 +68,18 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     detected_at     TEXT
 );
 
+-- Manual user changes layered on top of auto-detection, re-applied each sync:
+--   action 'add'     -> force this merchant to be a subscription
+--   action 'exclude' -> never treat this merchant as a subscription
+CREATE TABLE IF NOT EXISTS subscription_overrides (
+    merchant     TEXT PRIMARY KEY,    -- matched case-insensitively
+    action       TEXT NOT NULL,       -- 'add' | 'exclude'
+    avg_amount   REAL,                -- optional, for manual adds
+    cadence_days INTEGER,             -- optional, for manual adds
+    category     TEXT,                -- optional, for manual adds
+    created_at   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS access_tokens (
     item_id         TEXT PRIMARY KEY,
     access_token    TEXT NOT NULL,

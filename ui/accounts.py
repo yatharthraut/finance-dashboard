@@ -7,6 +7,7 @@ import streamlit as st
 
 from db import database as db
 from ingest.categorize import CATEGORIES
+from ui import _highlight
 from utils import analytics
 
 
@@ -17,6 +18,11 @@ def render() -> None:
     if accounts.empty:
         st.info("No accounts yet. Use the sidebar **Refresh** to load data.")
         return
+
+    # Loan accounts (e.g. the Amex personal loan) belong in the Loan tab, not in
+    # the spending/transactions view — exclude them here.
+    loan_ids = set(accounts.loc[accounts["type"] == "loan", "account_id"])
+    accounts = accounts[accounts["type"] != "loan"]
 
     # --- Filters ---
     f1, f2, f3 = st.columns([2, 2, 3])
@@ -32,6 +38,8 @@ def render() -> None:
     if df.empty:
         st.info("No transactions yet.")
         return
+    if loan_ids:
+        df = df[~df["account_id"].isin(loan_ids)]
 
     with f2:
         cats = ["All"] + sorted(df["category"].dropna().unique().tolist())
@@ -58,6 +66,11 @@ def render() -> None:
 
     st.caption(f"{len(view):,} transactions · ${view.loc[view['amount'] > 0, 'amount'].sum():,.2f} out")
 
+    subs = _highlight.subscription_merchants()
+    is_sub = _highlight.is_subscription(view["merchant"], subs)
+    if is_sub.any():
+        st.caption("🟡 Shaded rows are detected subscriptions.")
+
     display = view[
         ["date", "merchant", "name", "category", "amount", "account_name", "is_transfer"]
     ].copy()
@@ -74,7 +87,7 @@ def render() -> None:
         }
     )
     st.dataframe(
-        display,
+        _highlight.style_subscription_rows(display, is_sub),
         hide_index=True,
         use_container_width=True,
         column_config={

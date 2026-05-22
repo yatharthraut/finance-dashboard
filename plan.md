@@ -49,6 +49,64 @@ A local-hosted Streamlit dashboard that aggregates spending across TD Bank, Amex
 - `streamlit run app.py` → localhost:8501
 - Optional: schedule the sync with a cron job or a "Refresh" button in the UI
 
+## Phase 7 — Daily Text Report + Raspberry Pi Deployment
+
+Run the whole thing on a **Raspberry Pi Zero** (low-power, always-on) so it both
+**hosts the dashboard 24/7** and **texts a spending summary every morning**.
+
+### 7a. Daily report job (runs 7:00 AM)
+
+- New script `scripts/daily_report.py` that, in order:
+  1. `sync.run_sync()` — pull fresh transactions/balances (Plaid, or file import)
+  2. compute three numbers via `utils.analytics` (spend = money out, excluding
+     transfers/income):
+     - **Yesterday** — single-day total
+     - **This week so far** — Monday → today
+     - **This month** — 1st → today
+  3. format a short message and send it (see 7b)
+- Message format:
+  ```
+  💸 Spending update
+  Yesterday:  $42.10
+  This week:  $318.67
+  This month: $1,904.33
+  ```
+- Optional extras to fold in later: top category yesterday, any new subscription
+  detected, balance/credit-utilization warnings.
+
+### 7b. Sending the text — pick a channel
+
+- **Email-to-SMS gateway (free, recommended to start):** send an email via SMTP
+  (e.g. a Gmail account + app password) to your carrier's gateway address and it
+  arrives as a normal SMS. Examples:
+  - Verizon `number@vtext.com` · AT&T `number@txt.att.net` · T-Mobile
+    `number@tmomail.net`
+  - Pros: $0. Cons: carrier-dependent, can be flaky / occasionally deprecated.
+- **Twilio (paid, most reliable):** ~$1/mo number + ~$0.0079/SMS. Use the Twilio
+  REST API with account SID/auth token and a from-number.
+- **Push alternatives (free, not true SMS):** Telegram bot, `ntfy.sh`, or
+  Pushover — simplest to set up, deliver to your phone as a push notification.
+- New `.env` settings: chosen channel + credentials + recipient
+  (e.g. `SMS_TO`, `SMTP_USER`/`SMTP_PASS`, or `TWILIO_*`).
+
+### 7c. Scheduling on the Pi
+
+- `cron` entry on the Pi (Pi OS is Linux):
+  ```
+  0 7 * * *  cd /home/pi/finance_dashboard && .venv/bin/python -m scripts.daily_report >> logs/daily.log 2>&1
+  ```
+
+### 7d. Keep the dashboard running on the Pi
+
+- Run Streamlit as a **systemd service** so it auto-starts on boot and restarts
+  on crash; reach it on the LAN at `http://raspberrypi.local:8501`.
+- Pi Zero notes:
+  - Prefer a **Pi Zero 2 W** (quad-core) over the original Zero W — Streamlit +
+    pandas are heavy for a single core / 512 MB RAM. The dataset is tiny, so it
+    works, but the original Zero W will feel sluggish.
+  - Headless setup (SSH); store `.env` and `finance.db` on the Pi; never commit them.
+  - The daily report job itself is lightweight and runs fine even on a Zero W.
+
 ---
 
 ## Suggested Build Order
@@ -58,3 +116,4 @@ A local-hosted Streamlit dashboard that aggregates spending across TD Bank, Amex
 3. Subscription detection
 4. Claude chat sidebar with PII scrubbing
 5. Polish and cron
+6. Daily text report + deploy to the Raspberry Pi (Phase 7)

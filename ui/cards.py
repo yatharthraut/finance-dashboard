@@ -13,8 +13,24 @@ import streamlit as st
 from utils import analytics
 
 
+def _num(v) -> float | None:
+    """Coerce to float, treating None / NaN / non-numeric as None.
+
+    Needed because pandas stores missing values as NaN, and ``NaN or 0.0``
+    returns NaN (NaN is truthy) — which then breaks math and st.progress.
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(f) else f
+
+
 def _money(v) -> str:
-    return f"${v:,.2f}" if v not in (None, "") and not pd.isna(v) else "—"
+    f = _num(v)
+    return f"${f:,.2f}" if f is not None else "—"
 
 
 def _date(v) -> str:
@@ -54,13 +70,15 @@ def render() -> None:
 
     for _, c in cards.iterrows():
         with st.container(border=True):
-            mask = c["mask"] or "----"
+            mask = c["mask"] if isinstance(c["mask"], str) and c["mask"] else "----"
             st.markdown(f"**{c['institution']} · {c['name']}**  ····{mask}")
 
-            balance = c["current_balance"] or 0.0
-            limit = c["credit_limit"] or 0.0
-            card_util = (balance / limit * 100) if limit else None
-            apr = c.get("apr")
+            balance = _num(c["current_balance"]) or 0.0
+            limit = _num(c["credit_limit"])
+            # Utilization only makes sense with a real positive limit (charge
+            # cards / loans often report no limit).
+            card_util = (balance / limit * 100) if limit and limit > 0 else None
+            apr = _num(c.get("apr"))
 
             m = st.columns(4)
             m[0].metric("Balance", _money(balance))
@@ -68,10 +86,10 @@ def render() -> None:
             m[2].metric(
                 "Utilization", f"{card_util:.0f}%" if card_util is not None else "—"
             )
-            m[3].metric("APR", f"{apr:.2f}%" if apr not in (None, "") and not pd.isna(apr) else "—")
+            m[3].metric("APR", f"{apr:.2f}%" if apr is not None else "—")
 
             if card_util is not None:
-                st.progress(min(card_util / 100, 1.0))
+                st.progress(max(0.0, min(card_util / 100, 1.0)))
                 if card_util >= 30:
                     st.caption("⚠️ Utilization above 30% can weigh on your credit score.")
 
