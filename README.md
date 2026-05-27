@@ -2,7 +2,7 @@
 
 A local-hosted Streamlit dashboard that aggregates spending across **TD Bank**,
 **Amex** (card + personal loan), and **Discover**, detects subscriptions, and
-exposes an **anonymized Claude chat sidebar** for analysis.
+exposes a **Claude chat sidebar** for analysis.
 
 Everything runs locally against a SQLite file. It works out-of-the-box on
 realistic **mock data** — no Plaid or Anthropic keys required to explore the UI.
@@ -40,7 +40,6 @@ the subscription detector, and the loan tracker have something to show.
 | `PLAID_ENV`         | `sandbox` \| `development` \| `production`                      |
 | `ANTHROPIC_API_KEY` | Enables the Claude chat sidebar                                 |
 | `ANTHROPIC_MODEL`   | `claude-sonnet-4-6` (default) or `claude-opus-4-7`             |
-| `USER_NAME`         | Comma-separated names the PII scrubber redacts                  |
 | `DB_PATH`           | SQLite file path (default `finance.db`)                        |
 | `USE_MOCK_DATA`     | `1` to seed mock data when no Plaid items are linked            |
 
@@ -84,7 +83,7 @@ Secrets live only in `.env`, which is git-ignored. Never commit it.
 ingest/   Plaid client, mock generator, transfer tagging, subscription detection, sync
 db/       SQLite schema + access helpers (accounts, transactions, subscriptions)
 utils/    config (.env), analytics (all spending math)
-chat/     PII scrubber + Claude context builder / streaming client
+chat/     Claude context builder / streaming client
 ui/       Streamlit views: overview, breakdown, accounts, subscriptions, cards, loan, link, chat
 app.py    entry point (tabs + sidebar chat)
 ```
@@ -101,9 +100,8 @@ app.py    entry point (tabs + sidebar chat)
   date alongside utilization. Personal loans aren't covered by Liabilities, so
   the Loan tracker uses the balance + an adjustable APR instead.
 - **Claude chat**: builds a summary (optionally with recent transactions) from
-  the same analytics the dashboard uses, runs it through the PII scrubber, then
-  sends it as a cached system prompt. Account numbers, names, and addresses are
-  redacted; an "extra paranoid" toggle hides merchant names too.
+  the same analytics the dashboard uses and sends it as a cached system prompt.
+  Runs against your own Anthropic key; the API does not train on inputs.
 
 ---
 
@@ -118,5 +116,5 @@ Windows Task Scheduler (or cron on other platforms).
 ## Notes
 
 - Pinned dependency versions in `requirements.txt` are known-good; bump as needed.
-- The Anthropic API does not train on your inputs, but PII scrubbing is applied
-  regardless as defense-in-depth.
+- The Claude chat sends your financial summary to your own Anthropic key as-is;
+  the Anthropic API does not train on inputs.

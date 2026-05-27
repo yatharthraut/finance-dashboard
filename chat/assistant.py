@@ -1,116 +1,160 @@
-"""Claude chat: build a scrubbed financial context, then call the Anthropic API.
+"""Claude chat with a read-only SQL tool over the finance database.
 
-The context is assembled from the same analytics functions the dashboard uses,
-run through the PII scrubber, and prepended to the conversation as a system
-prompt. Two detail levels are supported (the plan's toggle):
-  * "summary"  — totals, category breakdown, subscription list only
-  * "detailed" — also includes recent (scrubbed) transaction lines
+Instead of dumping a fixed context, the model is given:
+  * a data-access guide ("skill") describing the ai_* views and conventions, and
+  * a ``query_finances`` tool that runs ONE read-only SELECT and returns CSV.
+
+The model queries the smallest data it needs (aggregate views by default,
+individual transactions only when necessary), which keeps token costs low. The
+guide is sent as a cached system block so it's paid for once per cache window.
 """
 
 from __future__ import annotations
 
+import csv
+import io
+import pathlib
+import sqlite3
 from datetime import date
 
-from chat.scrubber import scrub, scrub_merchant
-from db import database as db
-from ingest import subscriptions as subs_mod
-from utils import analytics
 from utils.config import settings
 
+# The "skill" the model follows whenever it accesses the data.
+DATA_GUIDE = pathlib.Path(__file__).with_name("data_guide.md").read_text(encoding="utf-8")
+
 SYSTEM_PROMPT = (
-    "You are a financial analyst with read-only access to the user's monthly "
-    "financial summary. The data has been anonymized: account numbers, names, "
-    "and addresses are redacted. Help the user analyze spending, identify "
-    "subscriptions worth cutting, and answer questions about their finances. "
-    "Be concrete and cite the numbers from the context. If the context lacks "
-    "the data needed to answer, say so plainly rather than guessing."
+    "You are a financial analyst for the user's personal finances. You have a "
+    "read-only SQL tool (query_finances) over their data. Always follow the data "
+    "access guide. Query the smallest amount of data needed to answer — prefer "
+    "the aggregate views and only pull individual transactions when necessary. "
+    "Cite concrete numbers from the results, and if the data can't answer, say so."
 )
 
+MAX_ROWS = 200          # cap rows returned to the model per query
+MAX_CHARS = 8000        # hard cap on a single tool result
+MAX_TOOL_TURNS = 6      # safety bound on the agentic loop
 
-def build_context(detail: str = "summary", *, paranoid: bool = False) -> str:
-    """Construct the scrubbed context block sent to Claude."""
-    start, end = analytics.month_bounds()
-    month_df = analytics.transactions_df(start=start, end=end)
-    all_df = analytics.transactions_df()
+TOOLS = [
+    {
+        "name": "query_finances",
+        "description": (
+            "Run ONE read-only SQL SELECT against the personal-finance SQLite "
+            "database and get rows back as CSV. Use the ai_* views from the data "
+            "guide. Filter and LIMIT to keep results small."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "A single read-only SELECT (or WITH ... SELECT) statement.",
+                }
+            },
+            "required": ["sql"],
+        },
+    }
+]
 
-    lines: list[str] = []
-    lines.append(f"# Financial summary (as of {date.today().isoformat()})")
-    lines.append("")
+_BANNED = {
+    "insert", "update", "delete", "drop", "alter", "attach", "detach",
+    "create", "replace", "pragma", "vacuum", "reindex", "truncate",
+}
 
-    # --- Accounts & balances ---
-    lines.append("## Accounts")
-    for a in db.get_accounts():
-        bal = a["current_balance"]
-        kind = a["subtype"] or a["type"]
-        bits = [f"- {a['institution']} {kind}: balance ${bal:,.2f}"]
-        if a["credit_limit"]:
-            bits.append(f"(limit ${a['credit_limit']:,.0f})")
-        lines.append(" ".join(bits))
-    lines.append("")
 
-    # --- This month's headline numbers ---
-    lines.append("## This month")
-    lines.append(f"- Income: ${analytics.total_income(month_df):,.2f}")
-    lines.append(f"- Total spend: ${analytics.total_spend(month_df):,.2f}")
-    lines.append(f"- Net cash flow: ${analytics.net_cash_flow(month_df):,.2f}")
-    lines.append("")
+def _validate_select(sql: str) -> tuple[str | None, str | None]:
+    """Return (clean_sql, None) if a safe read-only SELECT, else (None, error)."""
+    sql = (sql or "").strip().rstrip(";").strip()
+    low = sql.lower()
+    if not (low.startswith("select") or low.startswith("with")):
+        return None, "ERROR: only read-only SELECT queries are allowed."
+    if ";" in sql:
+        return None, "ERROR: only a single statement is allowed."
+    tokens = set(low.replace("(", " ").replace(")", " ").replace(",", " ").split())
+    if tokens & _BANNED:
+        return None, "ERROR: read-only queries only."
+    if "access_token" in low:
+        return None, "ERROR: that table is not accessible."
+    return sql, None
 
-    # --- Spending by category (this month) ---
-    cat = analytics.spend_by_category(month_df)
-    if not cat.empty:
-        lines.append("## Spending by category (this month)")
-        for _, row in cat.iterrows():
-            lines.append(f"- {row['category']}: ${row['amount']:,.2f}")
-        lines.append("")
 
-    # --- Subscriptions ---
-    active = [dict(s) for s in db.get_subscriptions(status="active")]
-    if active:
-        monthly = subs_mod.monthly_total(active)
-        lines.append(f"## Active subscriptions (~${monthly:,.2f}/mo total)")
-        for s in active:
-            lines.append(
-                f"- {scrub_merchant(s['merchant'])}: ${s['avg_amount']:,.2f} "
-                f"every ~{s['cadence_days']} days (last {s['last_charge']})"
-            )
-        lines.append("")
+def _readonly_conn():
+    # Read-only connection — writes are impossible even if a check is missed.
+    return sqlite3.connect(f"file:{settings.db_file}?mode=ro", uri=True)
 
-    canceled = [dict(s) for s in db.get_subscriptions(status="likely_canceled")]
-    if canceled:
-        lines.append("## Likely canceled subscriptions")
-        for s in canceled:
-            lines.append(
-                f"- {scrub_merchant(s['merchant'])}: was ${s['avg_amount']:,.2f}, "
-                f"last seen {s['last_charge']}"
-            )
-        lines.append("")
 
-    # --- Optional transaction-level detail ---
-    if detail == "detailed" and not all_df.empty:
-        recent = all_df.sort_values("date", ascending=False).head(50)
-        lines.append("## Recent transactions (last 50)")
-        for _, t in recent.iterrows():
-            merchant = "[merchant]" if paranoid else scrub_merchant(t["merchant"])
-            tag = " [transfer]" if t["is_transfer"] else ""
-            lines.append(
-                f"- {t['date'].date()} {merchant} ${t['amount']:,.2f} "
-                f"({t['category']}){tag}"
-            )
-        lines.append("")
+def run_finance_query(sql: str) -> str:
+    """Execute a guarded read-only SELECT and return CSV (or an ERROR string)."""
+    clean, err = _validate_select(sql)
+    if err:
+        return err
 
-    context = "\n".join(lines)
-    # Final safety pass over the whole block.
-    return scrub(context, paranoid=paranoid)
+    con = None
+    try:
+        con = _readonly_conn()
+        con.row_factory = sqlite3.Row
+        rows = con.execute(clean).fetchmany(MAX_ROWS + 1)
+    except Exception as exc:
+        return f"ERROR: {exc}"
+    finally:
+        if con is not None:
+            con.close()
+
+    truncated = len(rows) > MAX_ROWS
+    rows = rows[:MAX_ROWS]
+    if not rows:
+        return "(no rows)"
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(rows[0].keys())
+    for r in rows:
+        writer.writerow([r[k] for k in r.keys()])
+    out = buf.getvalue()
+    if truncated:
+        out += f"-- truncated to {MAX_ROWS} rows; add filters/LIMIT --\n"
+    return out[:MAX_CHARS]
+
+
+def run_finance_df(sql: str):
+    """Run a guarded read-only SELECT and return (DataFrame|None, error|None)."""
+    import pandas as pd
+
+    clean, err = _validate_select(sql)
+    if err:
+        return None, err
+    con = None
+    try:
+        con = _readonly_conn()
+        df = pd.read_sql_query(clean, con)
+    except Exception as exc:
+        return None, f"ERROR: {exc}"
+    finally:
+        if con is not None:
+            con.close()
+    return df.head(MAX_ROWS), None
+
+
+def _system_blocks() -> list[dict]:
+    """System prompt: role + cached data guide + a small live accounts snapshot."""
+    accounts = run_finance_query("SELECT * FROM ai_accounts")
+    return [
+        {"type": "text", "text": SYSTEM_PROMPT},
+        {"type": "text", "text": DATA_GUIDE, "cache_control": {"type": "ephemeral"}},
+        {
+            "type": "text",
+            "text": f"Today's date: {date.today().isoformat()}\n\nCurrent accounts:\n{accounts}",
+        },
+    ]
 
 
 def is_available() -> bool:
     return settings.has_anthropic
 
 
-def stream_reply(messages: list[dict], detail: str = "summary", *, paranoid: bool = False):
-    """Yield text chunks of Claude's reply.
+def stream_reply(messages: list[dict]):
+    """Yield text chunks of Claude's reply, running data queries as needed.
 
-    ``messages`` is a list of {"role": "user"|"assistant", "content": str}.
+    ``messages`` is the chat history: [{"role": "user"|"assistant", "content": str}].
     Raises RuntimeError if no API key is configured.
     """
     if not settings.has_anthropic:
@@ -119,22 +163,41 @@ def stream_reply(messages: list[dict], detail: str = "summary", *, paranoid: boo
     from anthropic import Anthropic
 
     client = Anthropic(api_key=settings.anthropic_api_key)
-    context = build_context(detail=detail, paranoid=paranoid)
-    system = [
-        {"type": "text", "text": SYSTEM_PROMPT},
-        {
-            "type": "text",
-            "text": context,
-            # Cache the (large, stable) context block across turns.
-            "cache_control": {"type": "ephemeral"},
-        },
-    ]
+    system = _system_blocks()
+    convo: list[dict] = [dict(m) for m in messages]
 
-    with client.messages.stream(
-        model=settings.anthropic_model,
-        max_tokens=1024,
-        system=system,
-        messages=messages,
-    ) as stream:
-        for text in stream.text_stream:
-            yield text
+    for _ in range(MAX_TOOL_TURNS):
+        with client.messages.stream(
+            model=settings.anthropic_model,
+            max_tokens=1500,
+            system=system,
+            tools=TOOLS,
+            messages=convo,
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+            final = stream.get_final_message()
+
+        if final.stop_reason != "tool_use":
+            return
+
+        # Record the assistant turn (text + tool_use blocks), then run the tools.
+        convo.append({"role": "assistant", "content": final.content})
+        results = []
+        for block in final.content:
+            if getattr(block, "type", None) == "tool_use":
+                if block.name == "query_finances":
+                    output = run_finance_query(block.input.get("sql", ""))
+                else:
+                    output = "ERROR: unknown tool."
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": output,
+                    }
+                )
+        convo.append({"role": "user", "content": results})
+        yield "\n\n_…checked your data…_\n\n"
+
+    yield "\n\n_(stopped after several lookups)_"

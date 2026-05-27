@@ -87,4 +87,136 @@ CREATE TABLE IF NOT EXISTS access_tokens (
     cursor          TEXT,                -- Plaid transactions/sync cursor
     created_at      TEXT
 );
+
+-- AI-export view: one clean, flat row per transaction joined to its account.
+-- Safe to hand to an LLM — no identifiers or masks, normalized values:
+--   * dropped: account_id, item_id, transaction_id, account mask
+--   * single effective `category` (override > plaid > 'Other')
+--   * `flow` = spend | income | transfer (so sign/transfer are unambiguous)
+--   * text trimmed; merchant falls back to the description when missing
+-- Rebuilt on every init so it always matches the latest schema.
+DROP VIEW IF EXISTS ai_export;
+CREATE VIEW ai_export AS
+SELECT
+    t.date                                              AS date,
+    TRIM(COALESCE(NULLIF(TRIM(t.merchant), ''), t.name)) AS merchant,
+    TRIM(t.name)                                        AS description,
+    t.amount                                            AS amount,
+    CASE
+        WHEN t.is_transfer = 1 THEN 'transfer'
+        WHEN t.amount < 0      THEN 'income'
+        ELSE 'spend'
+    END                                                 AS flow,
+    COALESCE(t.category_override, t.category, t.plaid_category, 'Other') AS category,
+    t.pending                                           AS pending,
+    t.currency                                          AS currency,
+    a.institution                                       AS account_institution,
+    TRIM(a.name)                                        AS account_name,
+    a.official_name                                     AS account_official_name,
+    a.type                                              AS account_type,
+    a.subtype                                           AS account_subtype,
+    a.current_balance                                   AS account_balance,
+    a.available_balance                                 AS account_available_balance,
+    a.credit_limit                                      AS account_credit_limit,
+    a.apr                                               AS account_apr,
+    a.minimum_payment                                   AS account_minimum_payment,
+    a.last_payment_amount                               AS account_last_payment_amount,
+    a.last_payment_date                                 AS account_last_payment_date,
+    a.last_statement_balance                            AS account_last_statement_balance,
+    a.last_statement_issue_date                         AS account_last_statement_issue_date,
+    a.next_payment_due_date                             AS account_next_payment_due_date,
+    a.is_overdue                                        AS account_is_overdue,
+    a.currency                                          AS account_currency,
+    a.updated_at                                        AS account_updated_at
+FROM transactions t
+JOIN accounts a ON a.account_id = t.account_id
+ORDER BY t.date DESC;
+
+-- ---------------------------------------------------------------------------
+-- Token-optimized views. Prefer these over ai_export for LLM context: the
+-- aggregates answer most questions in a fraction of the tokens, and the split
+-- accounts/transactions views avoid repeating account columns on every row.
+-- ---------------------------------------------------------------------------
+
+-- One row per account (no per-transaction repetition, no ids/mask).
+DROP VIEW IF EXISTS ai_accounts;
+CREATE VIEW ai_accounts AS
+SELECT
+    institution                AS account,
+    TRIM(name)                 AS name,
+    type                       AS type,
+    subtype                    AS subtype,
+    current_balance            AS balance,
+    available_balance          AS available_balance,
+    credit_limit               AS credit_limit,
+    apr                        AS apr,
+    minimum_payment            AS minimum_payment,
+    last_payment_amount        AS last_payment_amount,
+    last_payment_date          AS last_payment_date,
+    last_statement_balance     AS last_statement_balance,
+    last_statement_issue_date  AS last_statement_issue_date,
+    next_payment_due_date      AS next_payment_due_date,
+    is_overdue                 AS is_overdue,
+    currency                   AS currency
+FROM accounts;
+
+-- Lean transaction rows: account shown as a short label, not 18 columns.
+DROP VIEW IF EXISTS ai_transactions;
+CREATE VIEW ai_transactions AS
+SELECT
+    t.date                                              AS date,
+    TRIM(COALESCE(NULLIF(TRIM(t.merchant), ''), t.name)) AS merchant,
+    t.amount                                            AS amount,
+    CASE
+        WHEN t.is_transfer = 1 THEN 'transfer'
+        WHEN t.amount < 0      THEN 'income'
+        ELSE 'spend'
+    END                                                 AS flow,
+    COALESCE(t.category_override, t.category, t.plaid_category, 'Other') AS category,
+    a.institution || ' ' || COALESCE(a.subtype, a.type) AS account
+FROM transactions t
+JOIN accounts a ON a.account_id = t.account_id
+ORDER BY t.date DESC;
+
+-- Per-month income / spend / net (collapses 382 rows into a handful).
+DROP VIEW IF EXISTS ai_monthly_summary;
+CREATE VIEW ai_monthly_summary AS
+SELECT
+    strftime('%Y-%m', date) AS month,
+    ROUND(SUM(CASE WHEN is_transfer = 0 AND amount < 0 THEN -amount ELSE 0 END), 2) AS income,
+    ROUND(SUM(CASE WHEN is_transfer = 0 AND amount > 0
+                   AND COALESCE(category_override, category, plaid_category, 'Other') != 'Income'
+              THEN amount ELSE 0 END), 2) AS spend,
+    COUNT(*) AS txn_count
+FROM transactions
+GROUP BY month
+ORDER BY month DESC;
+
+-- Spend by month x category — the highest-value summary for an LLM.
+DROP VIEW IF EXISTS ai_category_monthly;
+CREATE VIEW ai_category_monthly AS
+SELECT
+    strftime('%Y-%m', date) AS month,
+    COALESCE(category_override, category, plaid_category, 'Other') AS category,
+    ROUND(SUM(amount), 2) AS spend,
+    COUNT(*)              AS txn_count
+FROM transactions
+WHERE is_transfer = 0
+  AND amount > 0
+  AND COALESCE(category_override, category, plaid_category, 'Other') != 'Income'
+GROUP BY month, category
+ORDER BY month DESC, spend DESC;
+
+-- Clean subscription list (detected + manual), no internal columns.
+DROP VIEW IF EXISTS ai_subscriptions;
+CREATE VIEW ai_subscriptions AS
+SELECT
+    merchant,
+    avg_amount,
+    cadence_days,
+    status,
+    last_charge,
+    category
+FROM subscriptions
+ORDER BY avg_amount DESC;
 """

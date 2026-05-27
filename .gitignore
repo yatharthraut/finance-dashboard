@@ -25,3 +25,6 @@ env/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local scratch / experiments
+scratch_ai/

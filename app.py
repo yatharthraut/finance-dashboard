@@ -3,7 +3,7 @@
 Run with:  streamlit run app.py   ->  http://localhost:8501
 
 Aggregates spending across TD Bank, Amex (card + personal loan), and Discover,
-detects subscriptions, and exposes an anonymized Claude chat sidebar.
+detects subscriptions, and exposes a Claude chat sidebar.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import streamlit as st
 from db import database as db
 from ingest import sync
 from ui import account_detail, accounts, breakdown, cards, chat_sidebar, link, loan, overview
+from ui import scratch_space
 from ui import subscriptions as subs_view
 from utils.config import settings
 
@@ -58,7 +59,7 @@ def main() -> None:
 
     tabs = st.tabs(
         ["Overview", "Breakdown", "All Transactions", "Accounts",
-         "Subscriptions", "Cards", "Loan", "Link"]
+         "Subscriptions", "Cards", "Loan", "AI Scratch Space", "Link"]
     )
     with tabs[0]:
         overview.render()
@@ -75,6 +76,8 @@ def main() -> None:
     with tabs[6]:
         loan.render()
     with tabs[7]:
+        scratch_space.render()
+    with tabs[8]:
         link.render()
 
     # Claude chat lives in the sidebar, per the plan.

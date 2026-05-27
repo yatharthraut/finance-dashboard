@@ -19,20 +19,8 @@ def render() -> None:
         )
         return
 
-    st.sidebar.caption(f"Model: `{settings.anthropic_model}`")
-
-    detail_label = st.sidebar.radio(
-        "Context detail",
-        ["Summary only", "Include transactions"],
-        horizontal=False,
-        help="Summary sends totals + subscriptions. The other adds recent "
-        "(PII-scrubbed) transaction lines.",
-    )
-    detail = "detailed" if detail_label == "Include transactions" else "summary"
-    paranoid = st.sidebar.checkbox(
-        "Extra paranoid (hide merchants)",
-        value=False,
-        help="Strip merchant names too — Claude sees categories only.",
+    st.sidebar.caption(
+        f"Model: `{settings.anthropic_model}` · queries your data live as needed"
     )
 
     if "chat" not in st.session_state:
@@ -59,9 +47,7 @@ def render() -> None:
         placeholder = st.empty()
         acc = ""
         try:
-            for chunk in assistant.stream_reply(
-                st.session_state.chat, detail=detail, paranoid=paranoid
-            ):
+            for chunk in assistant.stream_reply(st.session_state.chat):
                 acc += chunk
                 placeholder.markdown(acc + "▌")
             placeholder.markdown(acc)

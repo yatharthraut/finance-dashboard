@@ -29,10 +29,6 @@ def _get_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _names(raw: str) -> list[str]:
-    return [n.strip() for n in raw.split(",") if n.strip()]
-
-
 @dataclass(frozen=True)
 class Settings:
     # Plaid
@@ -47,7 +43,6 @@ class Settings:
     )
 
     # App
-    user_names: list[str] = field(default_factory=lambda: _names(_get("USER_NAME")))
     db_path: str = field(default_factory=lambda: _get("DB_PATH", "finance.db"))
     use_mock_data: bool = field(default_factory=lambda: _get_bool("USE_MOCK_DATA", True))
 
